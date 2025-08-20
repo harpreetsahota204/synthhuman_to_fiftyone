@@ -294,7 +294,7 @@ def create_fo3d(input_dir):
         mesh_id = name_parts[1] if len(name_parts) > 1 else Path(abs_mesh_path).stem
 
         # Skip if .fo3d already exists
-        output_path = input_dir / f"{mesh_id}.fo3d"
+        output_path = input_dir / f"fo3d_{mesh_id}.fo3d"
         if output_path.exists():
             print(f"Skipping existing fo3d: {output_path}")
             continue
