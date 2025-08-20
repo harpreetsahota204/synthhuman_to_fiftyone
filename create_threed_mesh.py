@@ -50,35 +50,51 @@ def _load_alpha_mask(alpha_path: Path, expected_shape):
         alpha = cv2.resize(alpha, (expected_shape[1], expected_shape[0]), interpolation=cv2.INTER_NEAREST)
     return alpha
 
-
 def create_meshes(idx_str, input_dir):
-    """Process a single sample index and save mesh to disk.
+    """
+    Reconstruct a mesh from a single dataset sample using Ball Pivoting.
 
     Args:
-        idx_str (str): the numeric identifier from filenames like depth_XXXXXX.exr
-        input_dir (str | Path): directory containing the input files
-    """
+        idx_str (str): zero-padded numeric identifier (e.g. "000123")
+        input_dir (str | Path): directory containing the dataset files
 
-    depth_path = Path(input_dir) / f"depth_{idx_str}.exr"
-    normal_path = Path(input_dir) / f"normal_{idx_str}.exr"
-    alpha_path = Path(input_dir) / f"alpha_{idx_str}.png"
-    rgb_path   = Path(input_dir) / f"rgb_{idx_str}.png"
-    cam_path   = Path(input_dir) / f"cam_{idx_str}.txt"
+    Workflow:
+        1. Load depth, RGB, normals, and intrinsics.
+        2. Backproject depth into a point cloud.
+        3. Attach RGB colors and (if valid) normals.
+        4. Reconstruct a mesh via Ball Pivoting (BPA).
+        5. Flip Y-axis to make geometry Y-up, fix winding, save to PLY.
+    """
+    input_dir = Path(input_dir)
+
+    # File paths
+    depth_path = input_dir / f"depth_{idx_str}.exr"
+    normal_path = input_dir / f"normal_{idx_str}.exr"
+    alpha_path = input_dir / f"alpha_{idx_str}.png"
+    rgb_path   = input_dir / f"rgb_{idx_str}.png"
+    cam_path   = input_dir / f"cam_{idx_str}.txt"
+    out_ply    = input_dir / f"mesh_{idx_str}.ply"
 
     # Skip if mesh already exists
-    existing_mesh_path = Path(input_dir) / f"mesh_{idx_str}.ply"
-    if existing_mesh_path.exists():
-        print(f"Skipping existing mesh: {existing_mesh_path}")
+    if out_ply.exists():
+        print(f"Skipping existing mesh: {out_ply}")
         return
 
-    # load data
+    # ---------------------------
+    # Load depth + intrinsics
+    # ---------------------------
     depth = cv2.imread(str(depth_path), cv2.IMREAD_UNCHANGED)
     if depth is None:
         raise FileNotFoundError(f"Depth not found: {depth_path}")
     depth = depth.astype(np.float32)
     if depth.ndim == 3:
-        depth = depth[..., 0]
+        depth = depth[..., 0]  # keep first channel if multi-channel EXR
 
+    intrinsics = load_camera_intrinsics(cam_path)
+
+    # ---------------------------
+    # Load RGB
+    # ---------------------------
     rgb_bgr = cv2.imread(str(rgb_path), cv2.IMREAD_UNCHANGED)
     if rgb_bgr is None:
         raise FileNotFoundError(f"RGB not found: {rgb_path}")
@@ -86,8 +102,11 @@ def create_meshes(idx_str, input_dir):
         rgb_bgr = cv2.cvtColor(rgb_bgr, cv2.COLOR_GRAY2BGR)
     elif rgb_bgr.shape[2] == 4:
         rgb_bgr = cv2.cvtColor(rgb_bgr, cv2.COLOR_BGRA2BGR)
-    rgb = rgb_bgr[:, :, ::-1]  # BGR→RGB
+    rgb = rgb_bgr[:, :, ::-1]  # BGR → RGB
 
+    # ---------------------------
+    # Load normals (optional)
+    # ---------------------------
     normals_img = cv2.imread(str(normal_path), cv2.IMREAD_UNCHANGED)
     if normals_img is not None:
         normals_img = normals_img.astype(np.float32)
@@ -95,85 +114,110 @@ def create_meshes(idx_str, input_dir):
             normals_img = None
         elif normals_img.shape[2] >= 3:
             normals_img = normals_img[:, :, :3]
+            # If encoded [0,1], map → [-1,1]
+            if 0.0 <= float(np.nanmin(normals_img)) and float(np.nanmax(normals_img)) <= 1.0:
+                normals_img = normals_img * 2.0 - 1.0
         else:
             normals_img = None
 
-    intrinsics = load_camera_intrinsics(cam_path)
-
-    # build validity mask: finite depth, positive, not sentinel; then alpha if available
+    # ---------------------------
+    # Build validity mask
+    # ---------------------------
     valid_mask = np.isfinite(depth)
     valid_mask &= depth > 0.0
-    valid_mask &= depth != 65504.0
+    valid_mask &= depth != 65504.0  # sentinel in EXR
 
     alpha = _load_alpha_mask(alpha_path, depth.shape)
     if alpha is not None:
         valid_mask &= alpha > 0
 
-    # backproject
+    # ---------------------------
+    # Backproject to 3D points
+    # ---------------------------
     points = depth_to_pointcloud(depth, intrinsics, valid_mask)
-
-    # flatten colors & normals in the same way as points
     mask_flat = valid_mask.flatten()
     colors = rgb.reshape(-1, 3)[mask_flat]
 
     normals_flat = None
     if normals_img is not None:
-        normals_flat = normals_img.reshape(-1, 3)[mask_flat]
-        # sanitize normals: finite and non-zero
-        finite_mask = np.isfinite(normals_flat).all(axis=1)
-        normals_flat = normals_flat[finite_mask]
-        points = points[finite_mask]
-        colors = colors[finite_mask]
-        # normalize to unit length, drop near-zero
-        norms = np.linalg.norm(normals_flat, axis=1)
-        nonzero = norms > 1e-6
-        normals_flat = normals_flat[nonzero]
-        points = points[nonzero]
-        colors = colors[nonzero]
-        normals_flat = normals_flat / np.linalg.norm(normals_flat, axis=1, keepdims=True)
+        normals_candidate = normals_img.reshape(-1, 3)[mask_flat]
+        finite_mask = np.isfinite(normals_candidate).all(axis=1)
+        norms = np.linalg.norm(normals_candidate[finite_mask], axis=1)
+        nonzero_mask = norms > 1e-6
+        if np.any(nonzero_mask):
+            valid_indices = np.where(finite_mask)[0][nonzero_mask]
+            points = points[valid_indices]
+            colors = colors[valid_indices]
+            normals_flat = normals_candidate[finite_mask][nonzero_mask]
+            normals_flat = normals_flat / np.linalg.norm(normals_flat, axis=1, keepdims=True)
 
-    # build point cloud
+    # ---------------------------
+    # Build Open3D point cloud
+    # ---------------------------
     pcd = o3d.geometry.PointCloud()
-    pcd.points  = o3d.utility.Vector3dVector(points)
-    pcd.colors  = o3d.utility.Vector3dVector(colors / 255.0)
+    pcd.points = o3d.utility.Vector3dVector(points)
+    pcd.colors = o3d.utility.Vector3dVector(colors / 255.0)
     if normals_flat is not None and len(normals_flat) == len(points):
         pcd.normals = o3d.utility.Vector3dVector(normals_flat)
     else:
-        # Estimate normals if none available or invalid
         pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
-        try:
-            pcd.orient_normals_consistent_tangent_plane(20)
-        except Exception:
-            pass
+        pcd.orient_normals_consistent_tangent_plane(20)
 
-    # mesh reconstruction (Poisson works best with normals)
-    mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-        pcd, depth=9
+    # ---------------------------
+    # Ball Pivoting Reconstruction
+    # ---------------------------
+    # Estimate average spacing between points
+    distances = pcd.compute_nearest_neighbor_distance()
+    avg_dist = np.mean(distances)
+
+    # Use multiple radii as multiples of avg spacing
+    radii = o3d.utility.DoubleVector([avg_dist * 1.5,
+                                      avg_dist * 2.5,
+                                      avg_dist * 3.0])
+
+    mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
+        pcd, radii
     )
-    # Remove low-density vertices which often correspond to artifacts
-    try:
-        densities = np.asarray(densities)
-        keep_thresh = np.quantile(densities, 0.02)
-        vertices_to_remove = densities < keep_thresh
-        mesh.remove_vertices_by_mask(vertices_to_remove)
-    except Exception:
-        pass
     mesh.compute_vertex_normals()
 
-    # save outputs with matching pattern
-    out_ply = depth_path.with_name(depth_path.name.replace("depth_", "mesh_").replace(".exr", ".ply"))
+    # ---------------------------
+    # Flip Y-axis → make geometry Y-up
+    # ---------------------------
+    flip_Y = np.eye(4)
+    flip_Y[1, 1] = -1.0
+    mesh.transform(flip_Y)
+
+    # Fix triangle winding after flip
+    tris = np.asarray(mesh.triangles)
+    if tris.size > 0:
+        mesh.triangles = o3d.utility.Vector3iVector(tris[:, [0, 2, 1]])
+    mesh.compute_vertex_normals()
+
+    # ---------------------------
+    # Save mesh
+    # ---------------------------
     o3d.io.write_triangle_mesh(str(out_ply), mesh)
     print(f"Saved {out_ply}")
+
 
 def _process_mesh_item(idx_str, input_dir):
     """Worker function that creates a mesh for the given index and returns output path."""
     create_meshes(idx_str, input_dir)
     return str(Path(input_dir) / f"mesh_{idx_str}.ply")
 
-
 def process_directory(input_dir, num_workers=None, use_processes=False):
     """
-    Iterate over all depth_*.exr files in the directory and generate meshes.
+    Generate meshes for all depth_*.exr files in a dataset directory using Ball Pivoting.
+
+    Args:
+        input_dir (str | Path): directory containing the dataset files
+        num_workers (int, optional): number of parallel workers (default: CPU count)
+        use_processes (bool): whether to use process-based parallelism
+
+    Workflow:
+        1. Find all depth_*.exr files.
+        2. Skip samples with an existing mesh_*.ply.
+        3. Reconstruct meshes in parallel with workers.
     """
     input_dir = Path(input_dir)
     depth_files = sorted(input_dir.glob("depth_*.exr"))
@@ -182,14 +226,13 @@ def process_directory(input_dir, num_workers=None, use_processes=False):
         print("No depth_*.exr files found.")
         return
 
+    # Collect jobs for missing meshes
     jobs = []
     for depth_path in depth_files:
         idx_str = depth_path.stem.split("_")[1]
         out_ply = input_dir / f"mesh_{idx_str}.ply"
-        if out_ply.exists():
-            # Skip already processed
-            continue
-        jobs.append(idx_str)
+        if not out_ply.exists():
+            jobs.append(idx_str)
 
     if not jobs:
         print("All meshes already exist.")
@@ -201,19 +244,22 @@ def process_directory(input_dir, num_workers=None, use_processes=False):
     errors = []
     successes = 0
     with ExecutorClass(max_workers=max_workers) as executor:
-        futures = [executor.submit(_process_mesh_item, idx_str, str(input_dir)) for idx_str in jobs]
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Meshing", unit="file"):
+        futures = [executor.submit(create_meshes, idx_str, str(input_dir))
+                   for idx_str in jobs]
+        for future in tqdm(as_completed(futures), total=len(futures),
+                           desc="Meshing", unit="file"):
             try:
                 _ = future.result()
                 successes += 1
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 errors.append(str(exc))
 
-    print(f"Meshed {successes}/{len(jobs)} items.")
+    print(f"✅ Meshed {successes}/{len(jobs)} items.")
     if errors:
-        print("Encountered errors (showing up to 10):")
+        print("⚠️ Encountered errors (showing up to 10):")
         for msg in errors[:10]:
             print(" -", msg)
+
 
 def create_fo3d(input_dir):
     """
