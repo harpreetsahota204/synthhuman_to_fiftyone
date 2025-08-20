@@ -26,6 +26,7 @@ def create_synthhuman_dataset(data_dir, dataset_name, overwrite=False):
         depth_path = data_path / f"depth_{sample_id}.png"
         normal_path = data_path / f"normal_{sample_id}.png"
         foreground_path = data_path / f"foreground_{sample_id}.png"
+        fo3d_path = data_path / f"fo3d_{sample_id}.fo3d"
         
         # Create a group to link different views of the same object
         group = fo.Group()
@@ -64,6 +65,13 @@ def create_synthhuman_dataset(data_dir, dataset_name, overwrite=False):
             group=group.element("normal")
         )
         samples.append(normal_sample)
+
+        # Create sample for fo3d
+        fo3d_sample = fo.Sample(
+            filepath=fo3d_path,
+            group=group.element("fo3d")
+        )
+        samples.append(fo3d_sample)
 
     dataset.add_samples(samples)
     dataset.compute_metadata()
