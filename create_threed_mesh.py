@@ -316,6 +316,7 @@ def create_fo3d(input_dir):
 
 def main(input_dir, workers=None, processes=False):
     process_directory(input_dir, num_workers=workers, use_processes=processes)
+    create_fo3d(input_dir)
 
 if __name__ == "__main__":
     import argparse
