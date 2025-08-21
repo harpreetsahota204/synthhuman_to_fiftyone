@@ -75,6 +75,7 @@ def create_synthhuman_dataset(data_dir, dataset_name, overwrite=False):
 
     dataset.add_samples(samples)
     dataset.compute_metadata()
+    dataset.save()
     return dataset
 
 
