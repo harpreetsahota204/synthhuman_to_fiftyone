@@ -1,5 +1,8 @@
 # SynthHuman to FiftyOne Pipeline
 
+![SynthHuman Demo](synthhuman-hq.gif)
+
+
 This repository provides a pipeline for processing the SynthHuman dataset into a format compatible with FiftyOne, enabling easy visualization and exploration of synthetic human data.
 
 ## Overview
