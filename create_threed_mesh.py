@@ -311,7 +311,7 @@ def create_fo3d(input_dir):
         scene.add(mesh)
 
         # Save the scene as a .fo3d file in the same directory
-        scene.write(str(output_path))
+        scene.write(str(output_path), resolve_relative_paths=True)
         print(f"Processed: {abs_mesh_path} -> {output_path}")
 
 def main(input_dir, workers=None, processes=False):
