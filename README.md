@@ -111,20 +111,38 @@ This step:
 ### 4. Create 3D Meshes
 
 ```bash
-# Run the 3D mesh creation script
+# Basic usage - high quality meshes
 python create_threed_mesh.py ./SynthHuman -j 8
+
+# Fast mode - optimized for speed (recommended for large datasets)
+python create_threed_mesh.py ./SynthHuman -j 8 --fast --skip-outliers
+
+# Maximum speed - for rapid prototyping
+python create_threed_mesh.py ./SynthHuman -j 8 --fast --skip-outliers --no-upsampling
 ```
 
-Options:
+**Performance Options:**
 - `-j/--workers`: Number of parallel workers (default: CPU count)
 - `--processes`: Use process-based parallelism instead of threads
+- `--fast`: Enable fast mode with adaptive quality settings (3-8x faster)
+- `--skip-outliers`: Skip outlier removal (recommended for clean synthetic data like SynthHuman)
+- `--no-upsampling`: Disable point cloud upsampling (2-4x faster)
+- `--no-smoothing`: Disable mesh smoothing (1.5-2x faster)
+
+**Quality vs Speed Guide:**
+- **Production quality**: Default settings (slower but best quality)
+- **Balanced**: `--fast` (good balance of speed and quality)
+- **Rapid iteration**: `--fast --skip-outliers --no-upsampling` (5-10x faster)
 
 This step:
-- Backprojects depth maps into 3D point clouds
+- Backprojects depth maps into 3D point clouds with optional upsampling
+- Applies morphological erosion to alpha masks to reduce edge artifacts
 - Uses camera intrinsics to ensure correct geometry
-- Applies Ball Pivoting Algorithm to reconstruct meshes
-- Creates FiftyOne 3D scenes (.fo3d files) for each mesh
-- Processes files in parallel for speed
+- Applies statistical outlier removal (auto-skipped for clean synthetic data)
+- Uses adaptive Ball Pivoting Algorithm with optimized radii selection
+- Applies mesh postprocessing (cleanup, smoothing) with adaptive iterations
+- Creates FiftyOne 3D scenes (.fo3d files) for each mesh with centered geometry
+- Processes files in parallel for maximum speed
 
 ### 5. Import to FiftyOne
 
